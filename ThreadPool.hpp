@@ -56,19 +56,52 @@ public:
         std::cout << "线程池析构函数调用完成" << std::endl;
     }
 
-    template<typename F, typename... Args>
-    void add_task(F&& f, Args&&... args) {//向线程池添加任务
-        {//创建一个局部作用域以确保在作用域结束时 lock 对象被销毁
+//--------c17标准-----------
+    // template<typename F, typename... Args>
+    // void add_task(F&& f, Args&&... args) {//向线程池添加任务
+    //     {//创建一个局部作用域以确保在作用域结束时 lock 对象被销毁
+    //         std::unique_lock<std::mutex> lock(mutex_);
+    //         while (task_queue.size() >= queue_max_size && !shutdown) {//防止假唤醒
+    //             not_full_.wait(lock);//阻塞等待并释放 lock 所持有的锁 直到条件变量not_full满足再次抢到锁
+    //         }
+    //         if (shutdown) return;
+    //         task_queue.emplace(std::function<void()>([f=std::forward<F>(f),args=std::make_tuple(std::forward<Args>(args)...)] {
+    //             std::apply(f, args);
+    //         }));
+    //     }
+    //     not_empty_.notify_one();//唤醒一个等待not_empty的线程
+    // }
+
+//----------c14版本-------
+     // 辅助函数，用于手动解包tuple并调用函数
+    template <typename F, typename Tuple, std::size_t... Is>
+    void call_with_tuple(F &&f, Tuple &&t, std::index_sequence<Is...>)
+    {
+        std::forward<F>(f)(std::get<Is>(std::forward<Tuple>(t))...);
+    }
+
+    // 通用辅助函数调用
+    template <typename F, typename Tuple>
+    void call_with_tuple(F &&f, Tuple &&t)
+    {
+        call_with_tuple(std::forward<F>(f), std::forward<Tuple>(t), std::make_index_sequence<std::tuple_size<std::remove_reference_t<Tuple>>::value>{});
+    }
+
+    template <typename F, typename... Args>
+    void add_task(F &&f, Args &&...args)
+    {     // 向线程池添加任务
+        { // 创建一个局部作用域以确保在作用域结束时 lock 对象被销毁
             std::unique_lock<std::mutex> lock(mutex_);
-            while (task_queue.size() >= queue_max_size && !shutdown) {//防止假唤醒
-                not_full_.wait(lock);//阻塞等待并释放 lock 所持有的锁 直到条件变量not_full满足再次抢到锁
+            while (task_queue.size() >= queue_max_size && !shutdown)
+            {                         // 防止假唤醒
+                not_full_.wait(lock); // 阻塞等待并释放 lock 所持有的锁 直到条件变量not_full满足再次抢到锁
             }
-            if (shutdown) return;
-            task_queue.emplace(std::function<void()>([f=std::forward<F>(f),args=std::make_tuple(std::forward<Args>(args)...)] {
-                std::apply(f, args);
-            }));
+            if (shutdown)
+                return;
+            task_queue.emplace([this, f = std::forward<F>(f), args = std::make_tuple(std::forward<Args>(args)...)]() mutable
+                               { call_with_tuple(std::move(f), std::move(args)); });
         }
-        not_empty_.notify_one();//唤醒一个等待not_empty的线程
+        not_empty_.notify_one(); // 唤醒一个等待not_empty的线程
     }
 
     void threadpool_thread(){//线程池中工作线程执行的函数
